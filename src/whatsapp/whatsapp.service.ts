@@ -21,6 +21,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private qrs: Map<string, string> = new Map();
   private connectionStatus: Map<string, string> = new Map();
   private readonly sessionsDir = path.join(process.cwd(), 'sessions');
+  private deletingSessions: Set<string> = new Set();
 
   async onModuleInit() {
     await fs.ensureDir(this.sessionsDir);
@@ -137,10 +138,20 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   async deleteSession(mobile: string) {
+    if (this.deletingSessions.has(mobile)) return;
+    this.deletingSessions.add(mobile);
+
     this.logger.log(`Logging out and deleting session for ${mobile}...`);
     
-    // 1. End the socket connection if it exists
     const sock = this.sockets.get(mobile);
+
+    // 1. Clear from memory first to prevent concurrent access
+    this.sockets.delete(mobile);
+    this.qrs.delete(mobile);
+    this.connectionStatus.delete(mobile);
+    this.contactStore.delete(mobile);
+
+    // 2. End the socket connection if it exists
     if (sock) {
       try {
         await sock.logout(); // This clears the remote session too
@@ -149,12 +160,6 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`Error during socket logout for ${mobile}: ${e.message}`);
       }
     }
-
-    // 2. Clear from memory
-    this.sockets.delete(mobile);
-    this.qrs.delete(mobile);
-    this.connectionStatus.delete(mobile);
-    this.contactStore.delete(mobile);
 
     // 3. Delete the session directory
     const sessionDir = path.join(this.sessionsDir, `auth_info_${mobile}`);
@@ -165,6 +170,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       }
     } catch (error) {
       this.logger.error(`Failed to delete session directory: ${error.message}`);
+    } finally {
+      this.deletingSessions.delete(mobile);
     }
   }
 
@@ -183,8 +190,11 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   private formatJid(target: string): string {
-    if (target.includes('@')) return target; // Already a JID (e.g. @g.us or @s.whatsapp.net)
+    if (target.includes('@')) return target; // Already a JID
     const cleanPhone = target.replace(/\D/g, '');
-    return `${cleanPhone.startsWith('91') ? '' : '91'}${cleanPhone}@s.whatsapp.net`;
+    // If it's exactly 10 digits, assume it's an Indian number and prepend 91
+    // If it's more than 10 digits, assume it already has a country code
+    const finalPhone = cleanPhone.length === 10 ? `91${cleanPhone}` : cleanPhone;
+    return `${finalPhone}@s.whatsapp.net`;
   }
 }
