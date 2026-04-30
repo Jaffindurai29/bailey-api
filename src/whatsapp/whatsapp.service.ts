@@ -55,7 +55,15 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
     this.sockets.set(mobile, sock);
 
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('creds.update', async () => {
+      try {
+        if (!this.deletingSessions.has(mobile)) {
+          await saveCreds();
+        }
+      } catch (error) {
+        this.logger.error(`Failed to save creds for ${mobile}: ${error.message}`);
+      }
+    });
 
     // Sync contacts
     sock.ev.on('contacts.upsert', (contacts) => {
@@ -145,15 +153,13 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     
     const sock = this.sockets.get(mobile);
 
-    // 1. Clear from memory first to prevent concurrent access
-    this.sockets.delete(mobile);
-    this.qrs.delete(mobile);
-    this.connectionStatus.delete(mobile);
-    this.contactStore.delete(mobile);
-
-    // 2. End the socket connection if it exists
+    // 1. End the socket connection if it exists
     if (sock) {
       try {
+        // Remove listeners to prevent any further disk writes or status updates
+        sock.ev.removeAllListeners('creds.update');
+        sock.ev.removeAllListeners('connection.update');
+        
         await sock.logout(); // This clears the remote session too
         sock.end(undefined);
       } catch (e) {
@@ -161,15 +167,23 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    // 2. Clear from memory
+    this.sockets.delete(mobile);
+    this.qrs.delete(mobile);
+    this.connectionStatus.delete(mobile);
+    this.contactStore.delete(mobile);
+
     // 3. Delete the session directory
     const sessionDir = path.join(this.sessionsDir, `auth_info_${mobile}`);
     try {
       if (await fs.pathExists(sessionDir)) {
+        // Give a moment for any pending OS file operations to settle
+        await delay(500);
         await fs.remove(sessionDir);
         this.logger.log(`Session directory deleted for ${mobile}`);
       }
     } catch (error) {
-      this.logger.error(`Failed to delete session directory: ${error.message}`);
+      this.logger.error(`Failed to delete session directory for ${mobile}: ${error.message}`);
     } finally {
       this.deletingSessions.delete(mobile);
     }
